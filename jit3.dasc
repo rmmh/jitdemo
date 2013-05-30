@@ -29,7 +29,14 @@ void err(const char *msg) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) err("Usage: jit3 <bf program>");
+  if (argc < 2) err("Usage: jit4 <bf file>");
+
+  FILE *fin = fopen(argv[1], "r");
+  if (!fin) {
+    perror("failed to open file");
+    return 1;
+  }
+
   dasm_State *state;
   initjit(&state, actions);
 
@@ -41,8 +48,9 @@ int main(int argc, char *argv[]) {
   |  push PTR
   |  mov  PTR, rdi
 
-  for (char *p = argv[1]; *p; p++) {
-    switch (*p) {
+  char p;
+  while ((p = fgetc(fin)) != EOF) {
+    switch (p) {
       case '>':
         |  inc  PTR
         break;
