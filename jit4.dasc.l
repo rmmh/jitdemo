@@ -25,7 +25,8 @@
 #define Dst &state
 #define MAX_NESTING 256
 
-#define MAX_SHIFT_DIST 128
+// tweak this
+#define MAX_SHIFT_DIST 256
 #define SHIFT_BUFSIZE (MAX_SHIFT_DIST * 2 + 1)
 
 // store a basic block (anything without branches) results
@@ -54,7 +55,7 @@ int compute_bb_effect(char *buf, int len) {
     }
   }
 
-  bb_effect.ptr_offset = off - 128;
+  bb_effect.ptr_offset = off - MAX_SHIFT_DIST;
 
   int touched = 0;
   for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
@@ -288,8 +289,10 @@ int main(int argc, char *argv[]) {
   |  ret
 
   void (*fptr)(char*) = jitcode(&state);
-  char *mem = calloc(30000, 1);
-  fptr(mem);
+  char *mem = calloc(30000 + 2 * MAX_SHIFT_DIST, 1);
+  // + 2*MAX_SHIFT_DIST so optimizations on [-<<<<+>>>>] won't crash.
+  // if ptr ever wanders outside its 30000 cell boundary, anything could happen!
+  fptr(mem + MAX_SHIFT_DIST);
   free(mem);
   free_jitcode(fptr);
   return 0;
