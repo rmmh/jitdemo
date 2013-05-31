@@ -25,6 +25,46 @@
 #define Dst &state
 #define MAX_NESTING 256
 
+#define MAX_SHIFT_DIST 128
+#define SHIFT_BUFSIZE (MAX_SHIFT_DIST * 2 + 1)
+
+// store a basic block (anything without branches) results
+// digest [-+><]* into the updates involved
+struct bb_effect_t {
+  int ptr_offset;
+  int8_t diff[SHIFT_BUFSIZE]; // diff[MAX_SHIFT_DIST] is how much ptr[0] changes
+} bb_effect;
+
+// update bb_effect
+// returns number of offsets changed, or -1 on error
+int compute_bb_effect(char *buf, int len) {
+  // count the values added to different offsets
+  // we assume changed values are within MAX_SHIFT_DIST bytes
+  // of ptr, and abort otherwise
+  memset(&bb_effect, 0, sizeof(bb_effect));
+
+  int off = MAX_SHIFT_DIST;
+
+  for (int i = 0; i < len; ++i) {
+    switch(buf[i]) {
+      case '+': bb_effect.diff[off]++; break;
+      case '-': bb_effect.diff[off]--; break;
+      case '<': if (--off < 0) return -1; break;
+      case '>': if (++off >= SHIFT_BUFSIZE) return -1; break;
+    }
+  }
+
+  bb_effect.ptr_offset = off - 128;
+
+  int touched = 0;
+  for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
+    if (bb_effect.diff[i]) {
+      touched++;
+    }
+  }
+  return touched;
+}
+
 dasm_State *state;
 unsigned int maxpc = 0;
 int pcstack[MAX_NESTING];
@@ -59,25 +99,33 @@ void err(const char *msg) {
   exit(1);
 }
 
+void emit_arith(int diff, int offset) {
+  if (diff == 1) {
+    | inc byte [PTR+offset]
+  } else if (diff == -1) {
+    | dec byte [PTR+offset]
+  } else if (diff > 0) {
+    | add byte [PTR+offset], diff
+  } else if (diff < 0) {
+    | sub byte [PTR+offset], -diff
+  }
 }
-%%
 
-[<>]+   {
-  int count = shiftcount(yytext, yyleng);
-  if (count > 0) {
+void emit_shift(int count) {
+  if (count == 1) {
+    | inc PTR
+  } else if (count == -1) {
+    | dec PTR
+  } else if (count > 0) {
     | add PTR, count
   } else if (count < 0) {
     | sub PTR, -count
   }
 }
-[-+]+   {
-  int count = addcount(yytext, yyleng);
-  if (count > 0) {
-    | add byte [PTR], count
-  } else if (count < 0) {
-    | sub byte [PTR], -count
-  }
+
 }
+%%
+
 "."   {
   |  movzx edi, byte [PTR]
   |  callp putchar
@@ -105,56 +153,71 @@ void err(const char *msg) {
   |  jne  =>(*top-1)
   |=>(*top-2):
 }
-"[-]"[+-]*  {
-  // zeroing a cell, maybe followed by an explicit set
- | mov byte [PTR], addcount(yytext + 3, yyleng - 3)
+[<>]+   {
+  int count = shiftcount(yytext, yyleng);
+  emit_shift(count);
 }
-"["[-+><]*"]" {
+[-+]+   {
+  int count = addcount(yytext, yyleng);
+  emit_arith(count, 0);
+}
+"["[-+><]*"]"[-+]* {
   // optimize loops with zero net pointer offset
   // that decrement ptr[0] once
-  // i.e., add/sub loops
-  if (shiftcount(yytext, yyleng) != 0) {
+  // i.e., add/sub loops [->>>+<<<]
+  // also handles [-] -> ptr[0] and [-]+ -> ptr[0] = 1, etc
+
+  // check for trailing +-
+  int rb_pos = strchr(yytext, ']') - yytext;
+  int post_diff = addcount(yytext + rb_pos, yyleng - rb_pos);
+
+  int num_touched = compute_bb_effect(yytext, rb_pos);
+
+  if (num_touched == -1) {
     REJECT;
   }
-
-  // count the values added to different offsets
-  // we assume changed values are within 128 bytes
-  // of ptr, and abort otherwise
-
-  uint8_t add_count[257]; // add_count[128] is how much ptr[0] changes by
-  memset(add_count, 0, sizeof(add_count));
-  int off = sizeof(add_count) / 2;
-
-  for (int i = 1; i < yyleng - 1; ++i) {
-    switch(yytext[i]) {
-      case '+': add_count[off]++; break;
-      case '-': add_count[off]--; break;
-      case '<': if (--off < 0) REJECT; break;
-      case '>': if (++off >= sizeof(add_count)) REJECT; break;
-    }
-  }
-
-  // ensure that ptr[0] is decremented once
-  if (add_count[128] != (uint8_t)-1) {
+  // zero net ptr offset
+  if (bb_effect.ptr_offset != 0) {
     REJECT;
   }
-
+  // ptr[0] decremented once
+  if (bb_effect.diff[MAX_SHIFT_DIST] != -1) {
+    REJECT;
+  }
   // only handle a single inc/dec per loc per loop
-  for (int i = 0; i < sizeof(add_count); ++i) {
-    if (add_count[i] != 0 && add_count[i] != 1 && add_count[i] != (uint8_t)-1) {
+  for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
+    if (bb_effect.diff[i] < -1 || bb_effect.diff[i] > 1) {
       REJECT;
     }
   }
 
-  | mov   al, byte [PTR]
+  if (num_touched > 1) { // num_touched == 1 implies [-]
+    | mov   al, byte [PTR]
+  }
 
-  for (int i = 0; i < sizeof(add_count); ++i) {
-    if (add_count[i] == 1) {
-      | add byte [PTR+i-128], al
-    } else if (add_count[i] == (uint8_t)-1) {
-      | sub byte [PTR+i-128], al
+  for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
+    if (i == MAX_SHIFT_DIST) {
+      assert(bb_effect.diff[i] == -1);
+      | mov byte [PTR], post_diff
+    } else if (bb_effect.diff[i] == 1) {
+      | add byte [PTR+i-MAX_SHIFT_DIST], al
+    } else if (bb_effect.diff[i] == -1) {
+      | sub byte [PTR+i-MAX_SHIFT_DIST], al
     }
   }
+}
+[-+><]+ {
+  // optimize "basic blocks"
+  if (compute_bb_effect(yytext, yyleng) == -1) {
+    REJECT;
+  }
+
+  for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
+    if (bb_effect.diff[i]) {
+      emit_arith(bb_effect.diff[i], i - MAX_SHIFT_DIST);
+    }
+  }
+  emit_shift(bb_effect.ptr_offset);
 }
 
 .
