@@ -33,9 +33,21 @@ int *top = pcstack, *limit = pcstack + MAX_NESTING;
 int addcount(char *buf, int len) {
   int ret = 0;
   for (int i = 0; i < len; i++) {
-    if (buf[i] == '+' || buf[i] == '>') {
+    if (buf[i] == '+') {
       ret++;
-    } else if (buf[i] == '-' || buf[i] == '<') {
+    } else if (buf[i] == '-') {
+      ret--;
+    }
+  }
+  return ret;
+}
+
+int shiftcount(char *buf, int len) {
+  int ret = 0;
+  for (int i = 0; i < len; i++) {
+    if (buf[i] == '>') {
+      ret++;
+    } else if ( buf[i] == '<') {
       ret--;
     }
   }
@@ -51,12 +63,20 @@ void err(const char *msg) {
 %%
 
 [<>]+   {
-  int count = addcount(yytext, yyleng);
-  | add PTR, count
+  int count = shiftcount(yytext, yyleng);
+  if (count > 0) {
+    | add PTR, count
+  } else if (count < 0) {
+    | sub PTR, -count
+  }
 }
 [-+]+   {
   int count = addcount(yytext, yyleng);
-  | add byte [PTR], count
+  if (count > 0) {
+    | add byte [PTR], count
+  } else if (count < 0) {
+    | sub byte [PTR], -count
+  }
 }
 "."   {
   |  movzx edi, byte [PTR]
@@ -88,6 +108,53 @@ void err(const char *msg) {
 "[-]"[+-]*  {
   // zeroing a cell, maybe followed by an explicit set
  | mov byte [PTR], addcount(yytext + 3, yyleng - 3)
+}
+"["[-+><]*"]" {
+  // optimize loops with zero net pointer offset
+  // that decrement ptr[0] once
+  // i.e., add/sub loops
+  if (shiftcount(yytext, yyleng) != 0) {
+    REJECT;
+  }
+
+  // count the values added to different offsets
+  // we assume changed values are within 128 bytes
+  // of ptr, and abort otherwise
+
+  uint8_t add_count[257]; // add_count[128] is how much ptr[0] changes by
+  memset(add_count, 0, sizeof(add_count));
+  int off = sizeof(add_count) / 2;
+
+  for (int i = 1; i < yyleng - 1; ++i) {
+    switch(yytext[i]) {
+      case '+': add_count[off]++; break;
+      case '-': add_count[off]--; break;
+      case '<': if (--off < 0) REJECT; break;
+      case '>': if (++off >= sizeof(add_count)) REJECT; break;
+    }
+  }
+
+  // ensure that ptr[0] is decremented once
+  if (add_count[128] != (uint8_t)-1) {
+    REJECT;
+  }
+
+  // only handle a single inc/dec per loc per loop
+  for (int i = 0; i < sizeof(add_count); ++i) {
+    if (add_count[i] != 0 && add_count[i] != 1 && add_count[i] != (uint8_t)-1) {
+      REJECT;
+    }
+  }
+
+  | mov   al, byte [PTR]
+
+  for (int i = 0; i < sizeof(add_count); ++i) {
+    if (add_count[i] == 1) {
+      | add byte [PTR+i-128], al
+    } else if (add_count[i] == (uint8_t)-1) {
+      | sub byte [PTR+i-128], al
+    }
+  }
 }
 
 .
