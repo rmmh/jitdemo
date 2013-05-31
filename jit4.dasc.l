@@ -266,17 +266,9 @@ int main(int argc, char *argv[]) {
   int buf_index;
   char p;
   while ((p = fgetc(fin)) != EOF) {
-    switch (p) {
-      case '>':
-      case '<':
-      case '+':
-      case '-':
-      case '.':
-      case ',':
-      case '[':
-      case ']':
-        buffer[buf_index++] = p;
-        assert(buf_index <= in_stat.st_size);
+    if (strchr("><+-.,[]", p)) {
+      buffer[buf_index++] = p;
+      assert(buf_index <= in_stat.st_size);
     }
   }
 
