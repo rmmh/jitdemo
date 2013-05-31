@@ -51,7 +51,7 @@ void *jitcode(dasm_State **state) {
   //  objdump -D -b binary -mi386 -Mx86-64 /tmp/jitcode
   // Or:
   //  ndisasm -b 64 /tmp/jitcode
-  fprintf(stderr, "code size: %ld\n", size);
+  fprintf(stderr, "code size: %zd\n", size);
   FILE *f = fopen("/tmp/jitcode", "wb");
   fwrite(ret, size, 1, f);
   fclose(f);

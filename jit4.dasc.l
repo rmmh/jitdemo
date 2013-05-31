@@ -4,22 +4,22 @@
 #include <stdint.h>
 #include <sys/stat.h>
 
-|.arch x64
+|.arch x86
 |.actionlist actions
 |
-|// Use rbx as our cell pointer.
-|// Since rbx is a callee-save register, it will be preserved
+|// Use ebx as our cell pointer.
+|// Since ebx is a callee-save register, it will be preserved
 |// across our calls to getchar and putchar.
-|.define PTR, rbx
+|.define PTR, ebx
+|
+|// ~10% smaller assembly when zero is in a register
+|.define ZERO, cl
 |
 |// Macro for calling a function.
-|// In cases where our target is <=2**32 away we can use
-|//   | call &addr
-|// But since we don't know if it will be, we use this safe
-|// sequence instead.
+|// restores our zero register after
 |.macro callp, addr
-|  mov64  rax, (uintptr_t)addr
-|  call   rax
+| call   &addr
+| mov    ZERO, 0
 |.endmacro
 
 #define Dst &state
@@ -127,8 +127,10 @@ void emit_shift(int count) {
 %%
 
 "."   {
-  |  movzx edi, byte [PTR]
+  |  mov al, byte [PTR]
+  |  push eax
   |  callp putchar
+  |  pop eax
 }
 ","   {
   |  callp getchar
@@ -142,14 +144,14 @@ void emit_shift(int count) {
   maxpc += 2;
   *top++ = maxpc;
   dasm_growpc(&state, maxpc);
-  |  cmp  byte [PTR], 0
+  |  cmp  byte [PTR], ZERO
   |  je   =>(maxpc-2)
   |=>(maxpc-1):
 }
 "]"   {
   if (top == pcstack) err("Unmatched ']'");
   top--;
-  |  cmp  byte [PTR], 0
+  |  cmp  byte [PTR], ZERO
   |  jne  =>(*top-1)
   |=>(*top-2):
 }
@@ -198,7 +200,11 @@ void emit_shift(int count) {
   for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
     if (i == MAX_SHIFT_DIST) {
       assert(bb_effect.diff[i] == -1);
-      | mov byte [PTR], post_diff
+      if (post_diff == 0) {
+        | mov byte [PTR], ZERO
+      } else {
+        | mov byte [PTR], post_diff
+      }
     } else if (bb_effect.diff[i] == 1) {
       | add byte [PTR+i-MAX_SHIFT_DIST], al
     } else if (bb_effect.diff[i] == -1) {
@@ -212,12 +218,22 @@ void emit_shift(int count) {
     REJECT;
   }
 
+  int preshift = 0;
+  if (!bb_effect.diff[MAX_SHIFT_DIST]) {
+    // ptr[0] isn't modified, shift first
+    emit_shift(bb_effect.ptr_offset);
+    preshift = bb_effect.ptr_offset;
+  }
+
   for (int i = 0; i < SHIFT_BUFSIZE; ++i) {
     if (bb_effect.diff[i]) {
-      emit_arith(bb_effect.diff[i], i - MAX_SHIFT_DIST);
+      emit_arith(bb_effect.diff[i], i - MAX_SHIFT_DIST - preshift);
     }
   }
-  emit_shift(bb_effect.ptr_offset);
+
+  if (!preshift) {
+    emit_shift(bb_effect.ptr_offset);
+  }
 }
 
 .
@@ -240,8 +256,10 @@ int main(int argc, char *argv[]) {
   initjit(&state, actions);
 
   // Function prologue.
+  |  mov  eax, [esp+4]
   |  push PTR
-  |  mov  PTR, rdi
+  |  mov  PTR, eax
+  |  mov  ZERO, 0
 
   char *buffer = malloc(in_stat.st_size);
   int buf_index;
