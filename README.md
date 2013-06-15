@@ -1,5 +1,5 @@
-beefit
-======
+jitdemo-2
+=========
 
 An optimizing Brainfuck JIT interpreter, based on [Josh Haberman's naive BF JIT](http://blog.reverberate.org/2012/12/hello-jit-world-joy-of-simple-jits.html).
 
